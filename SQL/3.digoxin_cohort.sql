@@ -1,3 +1,5 @@
+DROP MATERIALIZED VIEW IF EXISTS digoxin_cohort;
+CREATE MATERIALIZED VIEW digoxin_cohort AS
 -- 提取符合条件的患者
 WITH eligible_stays AS (
     -- 选择首次入ICU的患者，并且ICU住院时间≥1天
@@ -17,7 +19,7 @@ WITH eligible_stays AS (
 ),
 
 digoxin_med_criteria AS (
-    -- 筛选条件1: 入ICU后使用地高辛的情况
+    -- 修改条件1: 地高辛用药必须在ICU住院期间内
     SELECT DISTINCT
         es.subject_id,
         es.hadm_id,
@@ -27,14 +29,17 @@ digoxin_med_criteria AS (
     JOIN 
         mimiciv_hosp.digoxin_patients dp ON es.subject_id = dp.subject_id AND es.hadm_id = dp.hadm_id
     WHERE 
-        -- 地高辛用药开始时间在入ICU之后
-        (dp.starttime >= es.icu_intime) 
-        OR 
-        -- 地高辛用药时间段包含了ICU入住时间
-        (dp.starttime <= es.icu_intime AND dp.stoptime >= es.icu_intime)
-        AND
-        -- 确保用药时间在当次住院期间内
-        (dp.starttime <= es.dischtime)
+        -- 确保用药时间窗口与ICU住院期间有重叠
+        (
+            -- 用药开始时间在ICU住院期间内
+            (dp.starttime >= es.icu_intime AND dp.starttime <= es.icu_outtime)
+            OR
+            -- 用药结束时间在ICU住院期间内
+            (dp.stoptime >= es.icu_intime AND dp.stoptime <= es.icu_outtime)
+            OR
+            -- 用药时间窗口完全包含ICU住院期间
+            (dp.starttime <= es.icu_intime AND dp.stoptime >= es.icu_outtime)
+        )
 ),
 
 digoxin_conc_criteria AS (
@@ -58,7 +63,7 @@ digoxin_conc_criteria AS (
         (dc.hadm_id IS NULL OR dc.hadm_id = es.hadm_id)
 ),
 
--- 新增：检查是否有地高辛中毒记录
+-- 检查是否有地高辛中毒记录
 overdose_check AS (
     SELECT 
         es.subject_id,
@@ -82,7 +87,7 @@ overdose_check AS (
         es.subject_id, es.hadm_id, es.stay_id
 ),
 
--- 新增：检查给药途径
+-- 检查给药途径 - 也需要修改为ICU住院期间内
 route_check AS (
     SELECT 
         es.subject_id,
@@ -104,9 +109,17 @@ route_check AS (
     JOIN 
         mimiciv_hosp.digoxin_patients dp ON es.subject_id = dp.subject_id AND es.hadm_id = dp.hadm_id
     WHERE 
-        -- 确保用药时间在ICU入住后到出院前
-        ((dp.starttime >= es.icu_intime) OR (dp.starttime <= es.icu_intime AND dp.stoptime >= es.icu_intime))
-        AND dp.starttime <= es.dischtime
+        -- 确保用药时间与ICU住院期间有重叠
+        (
+            -- 用药开始时间在ICU住院期间内
+            (dp.starttime >= es.icu_intime AND dp.starttime <= es.icu_outtime)
+            OR
+            -- 用药结束时间在ICU住院期间内
+            (dp.stoptime >= es.icu_intime AND dp.stoptime <= es.icu_outtime)
+            OR
+            -- 用药时间窗口完全包含ICU住院期间
+            (dp.starttime <= es.icu_intime AND dp.stoptime >= es.icu_outtime)
+        )
     GROUP BY 
         es.subject_id, es.hadm_id, es.stay_id
 )
